@@ -1,0 +1,278 @@
+# .github/workflows/nix-build.yml  (public repo)
+#
+# Secrets required on this repo:
+#   EXTRA_SUBSTITUTER     — substituter URL
+#   EXTRA_SUBSTITUTER_KEY — public key for the extra substituter
+#   PRIVATE_REPO_PAT      — PAT with `contents: read` on any private repo that dispatches here
+
+name: Nix Build
+
+on:
+  repository_dispatch:
+    types: [nix-build]
+
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Private repository (owner/name)"
+        required: true
+      ref:
+        description: "Git ref (branch, tag, or SHA)"
+        required: true
+        default: main
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Enumerate all buildable flake targets
+  # ---------------------------------------------------------------------------
+  generate-matrix:
+    name: Generate build matrix
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: "write"
+      contents: "read"
+
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_targets: ${{ steps.matrix.outputs.has_targets }}
+
+    steps:
+      - name: Resolve repo and ref
+        id: resolve
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
+            echo "repo=${{ github.event.client_payload.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ github.event.client_payload.ref }}"   >> "$GITHUB_OUTPUT"
+          else
+            echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ inputs.ref }}"   >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: wimpysworld/nothing-but-nix@main
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        with:
+          extra-conf: |
+            substituters = ${{ secrets.EXTRA_SUBSTITUTER }}?priority=100
+            trusted-public-keys = ${{ secrets.EXTRA_SUBSTITUTER_KEY }}
+            build-dir = /nix/build
+
+      - name: Start Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          upstream-cache: ${{ secrets.EXTRA_SUBSTITUTER }}
+          use-flakehub: false
+
+      - name: Check out build repo (for scripts)
+        uses: actions/checkout@v6
+        with:
+          path: _build-repo
+
+      - name: Check out private repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.resolve.outputs.repo }}
+          ref: ${{ steps.resolve.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: _private-repo
+
+      - name: Generate matrix
+        id: matrix
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          set -euo pipefail
+          chmod +x _build-repo/scripts/generate-matrix.sh
+          matrix=$(_build-repo/scripts/generate-matrix.sh _private-repo)
+          echo "$matrix"
+
+          count=$(printf '%s' "$matrix" | jq '.include | length')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$count" -gt 0 ]]; then
+            echo "has_targets=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 2: One job per matrix entry
+  # ---------------------------------------------------------------------------
+  build:
+    name: "Build: ${{ matrix.name }}"
+    needs: generate-matrix
+    if: needs.generate-matrix.outputs.has_targets == 'true'
+
+    strategy:
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+      fail-fast: false
+
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    permissions:
+      id-token: "write"
+      contents: "read"
+
+    steps:
+      - name: Resolve repo and ref
+        id: resolve
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
+            echo "repo=${{ github.event.client_payload.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ github.event.client_payload.ref }}"   >> "$GITHUB_OUTPUT"
+          else
+            echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ inputs.ref }}"   >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: wimpysworld/nothing-but-nix@main
+
+      - name: Create Nix post-build hook
+        env:
+          CACHE_URL: ${{ secrets.EXTRA_SUBSTITUTER }}
+        run: |
+          sudo mkdir -p /nix
+          sudo tee /nix/post-build-hook.sh > /dev/null <<'EOF'
+          #!/bin/bash
+          set -uo pipefail
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          LOG="/tmp/nix-post-build-hook.log"
+          if [[ -n "${OUT_PATHS:-}" ]]; then
+            if nix copy --to "CACHE_URL_PLACEHOLDER/upload?compression=zstd" ${DRV_PATH:-} ${OUT_PATHS}; then
+              echo "OK ${DRV_PATH:-} ${OUT_PATHS}" >> "$LOG"
+            else
+              echo "FAIL ${DRV_PATH:-} ${OUT_PATHS}" >> "$LOG"
+            fi
+          fi
+          EOF
+          sudo sed -i "s|CACHE_URL_PLACEHOLDER|${CACHE_URL}|g" /nix/post-build-hook.sh
+          sudo chmod +x /nix/post-build-hook.sh
+          sudo touch /tmp/nix-post-build-hook.log
+          sudo chmod 666 /tmp/nix-post-build-hook.log
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        with:
+          extra-conf: |
+            substituters = ${{ secrets.EXTRA_SUBSTITUTER }}?priority=100
+            trusted-public-keys = ${{ secrets.EXTRA_SUBSTITUTER_KEY }}
+            build-dir = /nix/build
+            post-build-hook = /nix/post-build-hook.sh
+
+      - name: Start Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          upstream-cache: ${{ secrets.EXTRA_SUBSTITUTER }}
+          use-flakehub: false
+
+      - name: Check out build repo (for scripts)
+        uses: actions/checkout@v6
+        with:
+          path: _build-repo
+
+      - name: Check out private repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.resolve.outputs.repo }}
+          ref: ${{ steps.resolve.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: _private-repo
+
+      - name: Build and push targets
+        env:
+          SYSTEM: ${{ matrix.system }}
+          TARGETS_JSON: ${{ toJson(matrix.targets) }}
+          CACHE_URL: ${{ secrets.EXTRA_SUBSTITUTER }}
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          set -uo pipefail
+
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0='url.https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='ssh://git@github.com/'
+          export GIT_CONFIG_KEY_1='http.https://github.com/.extraheader'
+          export GIT_CONFIG_VALUE_1="Authorization: Basic $(printf 'x-access-token:%s' "$PRIVATE_REPO_PAT" | base64 -w0)"
+
+          failed_build=()
+          failed_push=()
+
+          build_one() {
+            local attr="$1" label="$2"
+
+            echo "::group::nix build: ${label}"
+            nix build \
+              "_private-repo#${attr}" \
+              --keep-going \
+              --print-build-logs \
+              --accept-flake-config \
+              --out-link "result-${label}" \
+            || failed_build+=("$label")
+            echo "::endgroup::"
+
+            if [[ ! -e "result-${label}" ]]; then
+              return
+            fi
+
+            echo "::group::nix copy: ${label}"
+            nix copy --to "$CACHE_URL/upload?compression=zstd" "$(readlink -f "result-${label}")" \
+            || failed_push+=("$label")
+            echo "::endgroup::"
+          }
+
+          while IFS=$'\t' read -r kind name; do
+            case "$kind" in
+              packages)
+                build_one "packages.${SYSTEM}.${name}"  "pkg-${name}"
+                ;;
+              devShells)
+                build_one "devShells.${SYSTEM}.${name}" "shell-${name}"
+                ;;
+              formatter)
+                [[ "$name" == "true" ]] || continue
+                build_one "formatter.${SYSTEM}" "fmt"
+                ;;
+              checks)
+                build_one "checks.${SYSTEM}.${name}"    "check-${name}"
+                ;;
+              nixosConfigurations)
+                build_one \
+                  "nixosConfigurations.${name}.config.system.build.toplevel" \
+                  "cfg-${name}"
+                ;;
+              *)
+                echo "::warning::Unknown target kind '${kind}', skipping '${name}'"
+                ;;
+            esac
+          done < <(printf '%s' "$TARGETS_JSON" | jq -r '
+            .[] | to_entries[]
+            | .key as $k
+            | (if (.value | type) == "array" then .value[] else "true" end)
+            | [$k, .] | @tsv
+          ')
+
+          ok=true
+
+          if [[ ${#failed_build[@]} -gt 0 ]]; then
+            echo "::error::Build failed for: ${failed_build[*]}"
+            ok=false
+          fi
+
+          if [[ ${#failed_push[@]} -gt 0 ]]; then
+            echo "::error::Cache push failed for: ${failed_push[*]}"
+            ok=false
+          fi
+
+          if [[ -f /tmp/nix-post-build-hook.log ]]; then
+            hook_failures=$(grep '^FAIL' /tmp/nix-post-build-hook.log || true)
+            if [[ -n "$hook_failures" ]]; then
+              echo "::error::Intermediate cache push failures detected:"
+              echo "$hook_failures"
+              ok=false
+            fi
+          fi
+
+          echo "::group::nix copy --all"
+          nix copy --to "$CACHE_URL/upload?compression=zstd" --all || true
+          echo "::endgroup::"
+
+          $ok || exit 1
