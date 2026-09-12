@@ -20,6 +20,11 @@ on:
         description: "Git ref (branch, tag, or SHA)"
         required: true
         default: main
+      update_flake:
+        description: "Run `nix flake update` before building"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -121,9 +126,11 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
             echo "repo=${{ github.event.client_payload.repo }}" >> "$GITHUB_OUTPUT"
             echo "ref=${{ github.event.client_payload.ref }}"   >> "$GITHUB_OUTPUT"
+            echo "update_flake=${{ github.event.client_payload.update_flake || false }}" >> "$GITHUB_OUTPUT"
           else
             echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
             echo "ref=${{ inputs.ref }}"   >> "$GITHUB_OUTPUT"
+            echo "update_flake=${{ inputs.update_flake }}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: wimpysworld/nothing-but-nix@main
@@ -178,6 +185,21 @@ jobs:
           ref: ${{ steps.resolve.outputs.ref }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: _private-repo
+
+      - name: Update flake.lock (optional)
+        if: steps.resolve.outputs.update_flake == 'true'
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0='url.https://github.com/.insteadOf'
+          export GIT_CONFIG_VALUE_0='ssh://git@github.com/'
+          export GIT_CONFIG_KEY_1='http.https://github.com/.extraheader'
+          export GIT_CONFIG_VALUE_1="Authorization: Basic $(printf 'x-access-token:%s' "$PRIVATE_REPO_PAT" | base64 -w0)"
+          nix flake update --accept-flake-config --flake _private-repo
+          echo "flake.lock updated (build-only, not committed)"
+          git -C _private-repo diff --stat -- flake.lock || true
 
       - name: Build and push targets
         env:
