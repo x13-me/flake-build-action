@@ -1,54 +1,12 @@
 #!/usr/bin/env bash
-# scripts/generate-matrix.sh
-#
-# Enumerates all buildable targets in a flake and emits a JSON matrix
-# whose shape mirrors the underlying flake's output structure.
-#
-# Output shape (system factored out into the matrix entry):
-#   {
-#     "include": [
-#       {
-#         "name":   "x86_64-linux",
-#         "system": "x86_64-linux",
-#         "runner": "ubuntu-24.04",
-#         "targets": [
-#           {"packages":            ["hello"]},
-#           {"devShells":           ["default"]},
-#           {"formatter":           true},
-#           {"nixosConfigurations": ["nixbook", "nixtainer"]}
-#         ]
-#       },
-#       {
-#         "name":   "check-test1 (x86_64-linux)",
-#         "system": "x86_64-linux",
-#         "runner": "ubuntu-24.04",
-#         "targets": [
-#           {"checks": ["test1"]}
-#         ]
-#       }
-#     ]
-#   }
-#
-# Each `targets` element is a single-key object whose key is a flake output
-# kind. Most kinds carry an array of leaf attribute names; `formatter` is a
-# boolean because Nix's formatter output has no leaf name (it lives at
-# formatter.<system> directly). Empty kinds are omitted from the array.
-#
-# Each batch entry bundles every non-check output for one system on a single
-# warm-store runner. Each check gets its own entry so a flaky check does not
-# poison neighbouring builds.
-#
-# Diagnostics go to stderr; only JSON goes to stdout.
 
 set -euo pipefail
 
-# rewrite git urls, there's no ssh here cap'n
 export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0='url.https://github.com/.insteadOf'
 export GIT_CONFIG_VALUE_0='ssh://git@github.com/'
 export GIT_CONFIG_KEY_1='http.https://github.com/.extraheader'
 export GIT_CONFIG_VALUE_1="Authorization: Basic $(printf 'x-access-token:%s' "$PRIVATE_REPO_PAT" | base64 -w0)"
-#
 
 FLAKE_DIR="${1:-.}"
 FLAKE_DIR="$(realpath "$FLAKE_DIR")"
@@ -57,15 +15,12 @@ SYSTEMS=("x86_64-linux" "aarch64-linux")
 
 runner_for_system() {
   case "$1" in
-    x86_64-linux)  echo "ubuntu-24.04" ;;
-    aarch64-linux) echo "ubuntu-24.04-arm" ;;
+    x86_64-linux)  echo "ubuntu-26.04" ;;
+    aarch64-linux) echo "ubuntu-26.04-arm" ;;
     *) return 1 ;;
   esac
 }
 
-# Enumerate leaf attribute names under a per-system output set.
-# Args: $1 = output kind (packages|devShells|checks), $2 = system
-# Output: one name per line; empty if the path is missing or the set is empty.
 list_per_system() {
   local kind="$1" system="$2"
   nix eval --json \
@@ -78,7 +33,6 @@ list_per_system() {
     || true
 }
 
-# Returns 0 if formatter.<system> resolves to a derivation.
 has_formatter() {
   local system="$1"
   nix eval \
@@ -105,9 +59,6 @@ done
 
 check_entries=()
 
-# ---------------------------------------------------------------------------
-# Per-system enumeration: packages, devShells, formatter, checks
-# ---------------------------------------------------------------------------
 for system in "${SYSTEMS[@]}"; do
   runner="$(runner_for_system "$system")"
   echo "--- ${system} (runner: ${runner}) ---" >&2
@@ -142,9 +93,6 @@ for system in "${SYSTEMS[@]}"; do
   done < <(list_per_system checks "$system")
 done
 
-# ---------------------------------------------------------------------------
-# nixosConfigurations: top-level enum, per-config hostPlatform inference
-# ---------------------------------------------------------------------------
 echo "--- nixosConfigurations ---" >&2
 
 cfg_names_json=$(nix eval --json \
@@ -178,9 +126,6 @@ for name in "${cfg_names[@]}"; do
   cfg_arr["$system"]=$(arr_append "${cfg_arr["$system"]}" "$name")
 done
 
-# ---------------------------------------------------------------------------
-# Assemble final matrix
-# ---------------------------------------------------------------------------
 include=()
 
 for system in "${SYSTEMS[@]}"; do
