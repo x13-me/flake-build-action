@@ -63,8 +63,8 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@v3
         with:
           extra-conf: |
-            substituters = https://${{ secrets.CACHE }}/?priority=100
-            trusted-public-keys = ${{ secrets.CACHE_KEY }}
+            substituters = https://${{ secrets.CACHE }}/?priority=100 ${{ vars.SUBSTITUTERS}}
+            trusted-public-keys = ${{ secrets.CACHE_KEY }} ${{ vars.PUBKEYS }}
             build-dir = /nix/build
           summarize: false
 
@@ -239,8 +239,8 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@v3
         with:
           extra-conf: |
-            substituters = https://${{ secrets.CACHE }}/?priority=100
-            trusted-public-keys = ${{ secrets.CACHE_KEY }}
+            substituters = https://${{ secrets.CACHE }}/?priority=100 ${{ vars.SUBSTITUTERS}}
+            trusted-public-keys = ${{ secrets.CACHE_KEY }} ${{ vars.PUBKEYS }}
             build-dir = /nix/build
             post-build-hook = /nix/post-build-hook.sh
 
