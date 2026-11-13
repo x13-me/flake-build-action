@@ -224,7 +224,7 @@ jobs:
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
           LOG="/tmp/nix-post-build-hook.log"
           if [[ -n "${OUT_PATHS:-}" ]]; then
-            if nix copy --to "${{ secrets.TARGET }}/upload?compression=zstd" ${DRV_PATH:-} ${OUT_PATHS}; then
+            if nix copy --to "https://${{ secrets.TARGET }}/upload?compression=zstd" ${DRV_PATH:-} ${OUT_PATHS}; then
               echo "OK ${DRV_PATH:-} ${OUT_PATHS}" >> "$LOG"
             else
               echo "FAIL ${DRV_PATH:-} ${OUT_PATHS}" >> "$LOG"
@@ -312,7 +312,7 @@ jobs:
             fi
 
             echo "::group::nix copy: ${label}"
-            nix copy --to "${{ secrets.TARGET }}/upload?compression=zstd" "$(readlink -f "result-${label}")" \
+            nix copy --to "https://${{ secrets.TARGET }}/upload?compression=zstd" "$(readlink -f "result-${label}")" \
             || failed_push+=("$label")
             echo "::endgroup::"
           }
@@ -370,7 +370,7 @@ jobs:
           fi
 
           echo "::group::nix copy --all"
-          nix copy --to "${{ secrets.TARGET }}/upload?compression=zstd" --all || true
+          nix copy --to "https://${{ secrets.TARGET }}/upload?compression=zstd" --all || true
           echo "::endgroup::"
 
           $ok || exit 1
