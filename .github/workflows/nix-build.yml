@@ -39,8 +39,6 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_targets: ${{ steps.matrix.outputs.has_targets }}
-      repo: ${{ steps.resolve.outputs.repo }}
-      sha: ${{ steps.source.outputs.sha }}
       report_status: ${{ steps.resolve.outputs.report_status }}
 
     steps:
@@ -380,24 +378,41 @@ jobs:
     needs: [generate-matrix, build]
     if: always() && needs.generate-matrix.outputs.has_targets == 'true' && needs.generate-matrix.outputs.report_status == 'true'
     runs-on: ubuntu-26.04
+    permissions:
+      contents: "read"
 
     steps:
+      - name: Resolve repo and ref
+        id: resolve
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
+            echo "repo=${{ github.event.client_payload.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ github.event.client_payload.ref }}"   >> "$GITHUB_OUTPUT"
+          else
+            echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ inputs.ref }}"   >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out private repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.resolve.outputs.repo }}
+          ref: ${{ steps.resolve.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: _private-repo
+
       - name: Report aggregate result
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
-          REPO: ${{ needs.generate-matrix.outputs.repo }}
-          SHA: ${{ needs.generate-matrix.outputs.sha }}
+          REPO: ${{ steps.resolve.outputs.repo }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MATRIX_RESULT: ${{ needs.generate-matrix.result }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           set -euo pipefail
           echo "::add-mask::${REPO}"
-          echo "::add-mask::${SHA}"
-          if [[ -z "${SHA:-}" || -z "${REPO:-}" ]]; then
-            echo "Missing source repo/SHA; cannot report status."
-            exit 0
-          fi
+          sha=$(git -C _private-repo rev-parse HEAD)
+          echo "::add-mask::${sha}"
 
           case "$BUILD_RESULT" in
             success)   state=success; description='All build targets succeeded' ;;
@@ -415,7 +430,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPO}/statuses/${SHA}" \
+            "https://api.github.com/repos/${REPO}/statuses/${sha}" \
             -d "$(jq -nc \
               --arg state "$state" \
               --arg target_url "$RUN_URL" \
